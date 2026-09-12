@@ -1,0 +1,155 @@
+name: Build CachyOS Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - development
+
+permissions:
+  contents: read
+
+jobs:
+  build-cachyos:
+    name: Build Arch/CachyOS package
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            base-devel \
+            git \
+            curl \
+            wget \
+            unzip \
+            file \
+            openssl \
+            pkgconf \
+            gtk3 \
+            webkit2gtk-4.1 \
+            libayatana-appindicator \
+            librsvg \
+            patchelf \
+            nodejs \
+            npm \
+            rust \
+            cargo
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun --version
+
+      - name: Install dependencies
+        run: |
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun install --frozen-lockfile
+
+      - name: Build desktop application
+        run: |
+          export PATH="$HOME/.bun/bin:$PATH"
+          bunx tauri build --target x86_64-unknown-linux-gnu
+
+      - name: Locate binary
+        run: |
+          find src-tauri/target/x86_64-unknown-linux-gnu/release \
+            -maxdepth 1 \
+            -type f \
+            -executable \
+            -print
+
+      - name: Create Arch package
+        shell: bash
+        run: |
+          set -e
+
+          VERSION="$(node -p "require('./package.json').version")"
+          PKGROOT="$PWD/pkgroot"
+
+          rm -rf "$PKGROOT"
+          mkdir -p \
+            "$PKGROOT/usr/bin" \
+            "$PKGROOT/usr/share/applications" \
+            "$PKGROOT/usr/share/icons/hicolor/32x32/apps" \
+            "$PKGROOT/usr/share/icons/hicolor/128x128/apps" \
+            "$PKGROOT/usr/share/icons/hicolor/256x256/apps"
+
+          cp \
+            "src-tauri/target/x86_64-unknown-linux-gnu/release/free-grind" \
+            "$PKGROOT/usr/bin/free-grind"
+
+          chmod 755 "$PKGROOT/usr/bin/free-grind"
+
+          cp src-tauri/icons/32x32.png \
+            "$PKGROOT/usr/share/icons/hicolor/32x32/apps/free-grind.png"
+
+          cp src-tauri/icons/128x128.png \
+            "$PKGROOT/usr/share/icons/hicolor/128x128/apps/free-grind.png"
+
+          cp src-tauri/icons/128x128@2x.png \
+            "$PKGROOT/usr/share/icons/hicolor/256x256/apps/free-grind.png"
+
+          cat > "$PKGROOT/usr/share/applications/free-grind.desktop" <<'EOF'
+          [Desktop Entry]
+          Name=Free Grind
+          Comment=Unofficial, privacy-focused Grindr client
+          Exec=free-grind
+          Icon=free-grind
+          Terminal=false
+          Type=Application
+          Categories=Network;InstantMessaging;
+          StartupWMClass=free-grind
+          EOF
+
+          cat > PKGBUILD <<EOF
+          pkgname=free-grind
+          pkgver=$VERSION
+          pkgrel=1
+          pkgdesc="Unofficial, free, libre and ad-free Grindr client"
+          arch=('x86_64')
+          url="https://github.com/storanyman/free-grind"
+          license=('custom')
+          depends=(
+            'gtk3'
+            'webkit2gtk-4.1'
+            'libayatana-appindicator'
+            'librsvg'
+          )
+          options=(!strip)
+
+          package() {
+              cp -a "$PKGROOT"/* "\$pkgdir"/
+          }
+          EOF
+
+          makepkg --nodeps --syncdeps --noconfirm
+
+      - name: Verify package
+        run: |
+          pkg="$(find . -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)"
+
+          test -n "$pkg"
+
+          echo "Package:"
+          file "$pkg"
+
+          echo
+          echo "Contents:"
+          tar --use-compress-program=unzstd -tf "$pkg"
+
+      - name: Upload CachyOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: free-grind-cachyos-x86_64
+          path: "*.pkg.tar.zst"
+          if-no-files-found: error
+          retention-days: 14
