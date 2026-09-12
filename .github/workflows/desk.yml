@@ -1,0 +1,165 @@
+name: Build Desk
+
+on:
+  push:
+    branches:
+      - development
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Free Grind for CachyOS
+    runs-on: ubuntu-24.04
+
+    container:
+      image: cachyos/cachyos:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            base-devel \
+            git \
+            curl \
+            wget \
+            unzip \
+            file \
+            cmake \
+            ninja \
+            nasm \
+            clang \
+            llvm \
+            gcc \
+            make \
+            openssl \
+            pkgconf \
+            gtk3 \
+            webkit2gtk-4.1 \
+            libayatana-appindicator \
+            librsvg \
+            patchelf \
+            nodejs \
+            npm \
+            rust \
+            cargo
+
+          echo "=== Toolchain ==="
+          cmake --version
+          clang --version
+          llvm-config --version
+          nasm -v
+          rustc --version
+          cargo --version
+          gcc --version
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        shell: bash
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+          echo "BUN_INSTALL=$HOME/.bun" >> "$GITHUB_ENV"
+
+      - name: Verify Bun
+        run: |
+          bun --version
+
+      - name: Configure LLVM
+        run: |
+          LIBCLANG_PATH="$(dirname "$(find /usr/lib -name 'libclang.so*' -type f | head -n1)")"
+
+          if [ -z "$LIBCLANG_PATH" ]; then
+            echo "ERROR: libclang.so was not found"
+            exit 1
+          fi
+
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> "$GITHUB_ENV"
+
+      - name: Install JavaScript dependencies
+        run: |
+          bun install --frozen-lockfile
+
+      - name: Build Tauri
+        run: |
+          bunx tauri build --target x86_64-unknown-linux-gnu
+
+      - name: Verify Tauri binary
+        run: |
+          test -x src-tauri/target/x86_64-unknown-linux-gnu/release/free-grind
+          file src-tauri/target/x86_64-unknown-linux-gnu/release/free-grind
+
+      - name: Create Arch package
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+
+          mkdir -p pkg
+
+          cp \
+            src-tauri/target/x86_64-unknown-linux-gnu/release/free-grind \
+            pkg/free-grind
+
+          cp \
+            src-tauri/icons/32x32.png \
+            pkg/free-grind.png
+
+          cat > pkg/PKGBUILD <<EOF
+          pkgname=free-grind
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="Free Grind desktop application"
+          arch=('x86_64')
+          url="https://github.com/storanyman/free-grind"
+          license=('custom')
+
+          depends=(
+            'gtk3'
+            'webkit2gtk-4.1'
+            'libayatana-appindicator'
+            'librsvg'
+          )
+
+          package() {
+            install -Dm755 \
+              "\$srcdir/free-grind" \
+              "\$pkgdir/usr/bin/free-grind"
+
+            install -Dm644 \
+              "\$srcdir/free-grind.png" \
+              "\$pkgdir/usr/share/icons/hicolor/32x32/apps/free-grind.png"
+
+            install -Dm644 /dev/stdin \
+              "\$pkgdir/usr/share/applications/free-grind.desktop" <<DESKTOP
+          [Desktop Entry]
+          Name=Free Grind
+          Comment=Free Grind
+          Exec=free-grind
+          Icon=free-grind
+          Terminal=false
+          Type=Application
+          Categories=Utility;
+          DESKTOP
+          }
+          EOF
+
+      - name: Build Arch package
+        working-directory: pkg
+        run: |
+          makepkg --syncdeps --noconfirm
+
+      - name: Verify package
+        working-directory: pkg
+        run: |
+          ls -lh *.pkg.tar.zst
+          pacman -Qp *.pkg.tar.zst
+
+      - name: Upload CachyOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: free-grind-cachyos
+          path: pkg/*.pkg.tar.zst
+          if-no-files-found: error
